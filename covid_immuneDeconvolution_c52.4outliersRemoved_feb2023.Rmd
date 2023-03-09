@@ -1,0 +1,281 @@
+---
+title: "Immune deconvolution in the mouse dataset C52"
+author: "Maria Secrier"
+date: "02/09/2022"
+output:
+  html_document:
+    df_print: paged
+    fig_crop: no
+    geometry: margin=1cm
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE)
+```
+
+## Dataset employed: in house
+
+## Lung cell signatures
+
+The signatures employed for immune deconvolution are human healthy lung signatures from Travaglini et al, bioRxiv 2019 (https://www.biorxiv.org/content/10.1101/742320v1.full.pdf).
+
+
+```{r processing, echo=FALSE, message=FALSE, warning=FALSE}
+library(gdata)
+library(ggplot2)
+library(ggpubr)
+library(ComplexHeatmap)
+library(corrplot)
+library(reshape)
+
+## Read in mouse data:
+gset <- read.delim("RNAseq Data C52/normalized_counts.tsv")
+
+# Remove outliers:
+gset <- gset[,which(!(colnames(gset) %in% c("S5962Nr3","S5962Nr6","S5962Nr72","S5962Nr34")))]
+
+# Read the ID mappings:
+ids <- read.xls("RNAseq Data C52/S5962_QC_results_27.6.22_bmer.xlsx")
+newnames <- sapply(colnames(gset[,3:ncol(gset)]),  
+       function(x) paste(strsplit(ids[match(x,ids$CeGaT.ID),]$Externe.ID,"_")[[1]][2:3], collapse="_"))
+colnames(gset)[3:ncol(gset)] <- newnames
+
+
+
+# Read lung immune cell sets:
+ consensusSigsInfo <- read.xls("../covid/humanLungCellSignaturesTravalginiKrasnow2019_supplementedWithXieetal2020_updated20200811.xlsx",
+                               stringsAsFactors=FALSE)
+ consensusSigsInfo[which(consensusSigsInfo$CellType == "Inflammatory Monocytic Macrophage"),]$CellType <- "Infl Mon Macrophage"
+
+#load("../covid/consensusSigs.mm.20200811.RData")
+
+#load("../covid/mappingMusHu.GSE33266.RData")
+
+# mouseids <- gset[,1:2]
+# colnames(mouseids) <- c("ensembl_gene_id","mgi_symbol")
+# conv <- convertMouseGeneList2(mouseids$mgi_symbol)
+# save(conv, file="conv.RData")
+
+# gene_data_frame.mapped <- merge(gset,
+#                                 unique(conv[,c("MGI.symbol","HGNC.symbol")]),
+#                                 by.x="gene",
+#                                 by.y="MGI.symbol",
+#                                 all.x=TRUE, all.y=FALSE)
+# gene_data_frame.mapped[which(is.na(gene_data_frame.mapped$HGNC.symbol)),]$HGNC.symbol <- toupper(gene_data_frame.mapped[which(is.na(gene_data_frame.mapped$HGNC.symbol)),]$gene)
+# gset.selected.mushu <- data.frame(gene_data_frame.mapped[,-c(1,2)])
+# colnames(gset.selected.mushu)[ncol(gset.selected.mushu)] <- "GENE_SYMBOL"
+# gset.selected.mushu$GENE_SYMBOL <- toupper(gset.selected.mushu$GENE_SYMBOL)
+
+# gset.average.mus <- NULL
+# for (g in unique(gset$gene)) {
+#   sel <- gset[which(gset$gene == g),3:(ncol(gset))]
+#   cm <- colMeans(sel)
+#   gset.average.mus <- rbind(gset.average.mus,cm)
+# }
+# rownames(gset.average.mus) <- unique(gset$gene)
+# gset.average.mus <- log2(gset.average.mus+1)
+# save(gset.average.mus, file="gset.average.mus.4outliersremoved.C52.feb2023.RData")
+
+gset$gene <- toupper(gset$gene)
+gset <- gset[which(!duplicated(gset$gene)),]
+gset.average.mus <- gset[,-c(1:2)]
+rownames(gset.average.mus) <- gset$gene
+gset.average.mus <- log2(gset.average.mus+1)
+
+load("consensusSigs.supplemented.feb2023.RData")
+
+unlist(consensusSigs)[which(!(unlist(consensusSigs) %in% 
+                             rownames(gset.average.mus)))]
+
+### Replace consensus sigs that do not work well:
+# consensusSigs$`B Cell` <- c(setdiff(consensusSigs$`B Cell`,"CD24"),"CD24A")
+# consensusSigs$`Plasma Cell` <- c(setdiff(consensusSigs$`Plasma Cell`,"TNFRSF7"),"CD27")
+# consensusSigs$`CD8 Naive T Cell` <- c(setdiff(consensusSigs$`Plasma Cell`,"GZMH"),"GZMC")
+# consensusSigs$`Basal Cell` <- c(setdiff(consensusSigs$`Basal Cell`,"TP63"),"TRP63")
+# consensusSigs$`Vein Cell` <- c(setdiff(consensusSigs$`Vein Cell`,"DARC"),"ACKR1")
+# consensusSigs$`TREM2 DC` <- c(setdiff(consensusSigs$`TREM2 DC`,"MHCII"),"H2-AB1")
+# consensusSigs$mDC <- c(setdiff(consensusSigs$mDC,"MHCII"),"H2-AB1")
+# consensusSigs$`Macrophage M2` <- c(setdiff(consensusSigs$`Macrophage M2`,"CD23"),"FCER2A")
+# consensusSigs$`Macrophage M1` <- c(setdiff(consensusSigs$`Macrophage M1`,"CD32"),"FCGR2B")
+# 
+# save(consensusSigs, file="consensusSigs.supplemented.feb2023.RData")
+
+
+### First, infer immune infiltrates, which are done based on mouse genes:
+
+library(GSVA)
+imm.scores.mouse <- gsva(as.matrix(gset.average.mus),
+                         consensusSigs, 
+                   method="ssgsea", kcdf="Gaussian",
+                   mx.diff=TRUE, abs.ranking=FALSE,
+                   verbose=FALSE)
+df.scores.mouse <- data.frame(t(imm.scores.mouse))
+df.scores.mouse$Sample <-rownames(df.scores.mouse)
+
+library(reshape)
+gset.melted <- melt(df.scores.mouse)
+colnames(gset.melted) <- c("Experiment","CellType","Infiltration")
+gset.melted$CellType <- sapply(gset.melted$CellType,
+                               function(x) paste(strsplit(as.character(x),"\\.")[[1]],collapse=" "))
+gset.melted <- merge(gset.melted,
+                     consensusSigsInfo[,c("Category","CellType")],
+                     by.x="CellType",by.y="CellType",
+                     all.x=TRUE,all.y=FALSE)
+
+
+gset.melted$Day <- sapply(gset.melted$Experiment,
+                          function(x) strsplit(x,"_")[[1]][1])
+
+gset.melted$Condition <- sapply(gset.melted$Experiment, function(x) ifelse(grepl("E",x),"Control","Infected"))
+gset.melted$Condition <- factor(gset.melted$Condition)
+gset.melted$Group <- apply(gset.melted[,c("Day","Condition")],1,
+                   function(x) ifelse(x[2] == "Control","Control",
+                                      paste0(x[2],"_",x[1])))
+gset.melted$Group <- factor(gset.melted$Group)
+
+gset.melted$Time <- sapply(gset.melted$Day, 
+                           function(x) strsplit(x,"d")[[1]][2])
+gset.melted$Time <- as.numeric(gset.melted$Time)
+
+my_comparisons <- list(c("d2","d3"),
+                       c("d3","d4"),
+                       c("d4","d5"))
+
+gset.melted <- gset.melted[which(gset.melted$CellType!="ImmuneScore"),]
+save(gset.melted,file="gset.melted.4outliersremoved.feb2023.RData")
+
+## Further filter for selected cell types:
+gset.melted <- gset.melted[which(gset.melted$CellType %in%
+                                   c("Neutrophil","Activated neutrophil",
+                                     "Macrophage M1","Inflammatory Monocytic Macrophage",
+                                     "Natural Killer Cell")),]
+gset.melted[which(gset.melted$CellType == "Inflammatory Monocytic Macrophage"),]$CellType <- "Inflam Monocyt Macroph"
+
+### Load significant genes to get the top DE:
+load("resSig.c52.RData")
+# Markers of interest:
+allgenes <- c("Tnf","Fasl","Tnfsf8","Tnfsf4","Tnfsf9","Tnfsf10","Tnfsf14","Tnfsf13b",
+             "Tnfsf15","Tnfsf18","Lta","Tnfsf11","Ltb","Tnfsf12","Tnfsf13","Eda",
+             "Cd40lg","Tnfsf13os","Cd70")
+resSig.sel <- resSig[which(resSig$ENSEMBL %in% allgenes),]
+r <- resSig.sel[rev(order(abs(resSig.sel$log2FoldChange))),]
+top5 <- rownames(r)[1:5]
+
+
+gset.keygenes <- gset.average.mus[which(rownames(gset.average.mus) %in% 
+                        toupper(top5)),]
+gset.keygenes$Gene <- rownames(gset.keygenes)
+
+my_comparisons <- list(c("Control","Infected_d2"),
+                       c("Infected_d2","Infected_d3"),
+                       c("Infected_d3","Infected_d4"),
+                       c("Infected_d4","Infected_d5"),
+                       c("Control","Infected_d5"))
+
+
+```
+
+
+
+
+## Plot correlations in a heat map:
+
+```{r echo=FALSE, warning=FALSE}
+
+gset.genes.expr <- melt(gset.keygenes)
+colnames(gset.genes.expr) <- c("Gene","Experiment","Expression")
+
+gset.merged <- merge(gset.melted,gset.genes.expr,
+                     by.x="Experiment",by.y="Experiment",
+                     all.x=FALSE, all.y=FALSE)
+
+## Keep only infected samples:
+gset.merged <- gset.merged[which(gset.merged$Group !="Control"),]
+
+corrMatHeat <- array(-1,c(length(unique(gset.merged$Gene)),
+                     length(unique(gset.merged$CellType))))
+rownames(corrMatHeat) <- unique(gset.merged$Gene)
+colnames(corrMatHeat) <- unique(gset.merged$CellType)
+corrMatPval <- corrMatHeat
+
+for (g in unique(gset.merged$Gene)) {
+  for (c in unique(gset.merged$CellType)) {
+    corrMatHeat[g,c] <- cor.test(unique(gset.merged[which(gset.merged$Gene == g),c("Experiment","Expression")])$Expression,
+    unique(gset.merged[which(gset.merged$CellType == c),c("Experiment","Infiltration")])$Infiltration)$estimate
+    corrMatPval[g,c] <- cor.test(unique(gset.merged[which(gset.merged$Gene == g),c("Experiment","Expression")])$Expression,
+    unique(gset.merged[which(gset.merged$CellType == c),c("Experiment","Infiltration")])$Infiltration)$p.value
+  }
+}
+
+corrMatPval.stars <- corrMatPval
+
+corrMatPval.stars[corrMatPval>=0.05] <- "ns"
+corrMatPval.stars[corrMatPval<0.05] <- "*"
+corrMatPval.stars[corrMatPval<0.01] <- "**"
+corrMatPval.stars[corrMatPval<0.001] <- "***"
+corrMatPval.stars[corrMatPval<0.0001] <- "****"
+
+
+library(pheatmap)
+
+pdf("plots.c52.feb2023/correlationsBetweenKeyFactorsAndImmuneCellsDuringInfectionDays2-5.clusteredHeatmap.pdf",w=4.5,h=4.5)
+pheatmap(corrMatHeat,display_numbers = corrMatPval.stars,
+         colorRampPalette(c("#17255A","white","#BD1E1E"))(100))
+dev.off()
+
+```
+
+
+
+
+Here plot improved correlation plots:
+```{r}
+
+### Melt gene matrix:
+gexp <- melt(gset.keygenes)
+colnames(gexp) <- c("Gene","Experiment","Expression")
+
+# Merge with infiltration df:
+df.mousegenes <- merge(gset.melted,gexp,
+                       by.x="Experiment",by.y="Experiment",
+                       all.x=FALSE,all.y=FALSE)
+df.mousegenes$Group <- factor(df.mousegenes$Group)
+df.mousegenes$CellType <- factor(df.mousegenes$CellType)
+df.mousegenes$Gene <- factor(df.mousegenes$Gene)
+df.mousegenes$Expression <- as.numeric(df.mousegenes$Expression)
+df.mousegenes$Infiltration <- as.numeric(df.mousegenes$Infiltration)
+df.mousegenes.inf <- df.mousegenes[which(df.mousegenes$Group!="Control"),]
+
+pal <- c("#796465","#9ebcda","#8c96c6","#88419d","#4d004b")
+
+pdf("plots.c52.feb2023/correlationScatterPlots.KeyGenes_vs_CellAbundance.allInfected.pdf",w=10,h=10)
+ggscatter(df.mousegenes.inf,
+            x = "Expression", y = "Infiltration",
+            add = "reg.line", conf.int = TRUE,color="Condition",palette=pal[2],
+            cor.coef = TRUE)+
+              xlab("Gene expression")+
+              ylab("Cell Infiltration")+
+    facet_grid(CellType~Gene,scale="free")
+dev.off()
+
+pdf("plots.c52.feb2023/correlationScatterPlots.KeyGenes_vs_CellAbundance.byDay.pdf",w=14,h=14)
+ggscatter(df.mousegenes,
+            x = "Expression", y = "Infiltration",
+            add = "reg.line", conf.int = TRUE,
+            #cor.coef = TRUE,
+            color="Condition",palette = pal[c(1,5)],
+        shape="Condition")+
+          stat_cor(aes(color = Condition))+
+              xlab("Gene expression")+
+              ylab("Cell Infiltration")+
+    facet_wrap(CellType~Gene,scale="free")
+dev.off()
+
+
+```
+
+
+
+
+
